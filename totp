@@ -1,0 +1,504 @@
+#!/usr/bin/env bash
+# totp.sh : hyb
+# Description: Encrypted TOTP secret store.
+# Based on Bash Boilerplate: https://github.com/xwmx/bash-boilerplate
+
+###############################################################################
+# ▄▄▄▄▄      ▄▄▄▄▄ ▄▄▄·
+# •██  ▪     •██  ▐█ ▄█
+#  ▐█.▪ ▄█▀▄  ▐█.▪ ██▀·
+#  ▐█▌·▐█▌.▐▌ ▐█▌·▐█▪·•
+#  ▀▀▀  ▀█▄▀▪ ▀▀▀ .▀
+#
+# Encrypted TOTP secret store.
+#
+# Dependencies:
+#  gpg
+#  oathtool
+#  qrencode
+###############################################################################
+
+set -o nounset
+set -o errexit
+set -o pipefail
+IFS=$'\n\t'
+
+_ME="$(basename "${0}")"
+_VERSION="1.0.0"
+_SECRET_DIR=~/.totp-store
+
+# helper functions ############################################################
+
+_exit_1() {
+  {
+    printf "%s " "$(tput setaf 1)!$(tput sgr0)"
+    "${@}"
+  } 1>&2
+  exit 1
+}
+
+_warn() {
+  {
+    printf "%s " "$(tput setaf 1)!$(tput sgr0)"
+    "${@}"
+  } 1>&2
+}
+
+_command_exists() {
+  hash "${1}" 2>/dev/null
+}
+
+_contains() {
+  local _query="${1:-}"
+  shift
+
+  if [[ -z "${_query}"  ]] ||
+     [[ -z "${*:-}"     ]]
+  then
+    return 1
+  fi
+
+  for __element in "${@}"
+  do
+    [[ "${__element}" == "${_query}" ]] && return 0
+  done
+
+  return 1
+}
+
+_blank() {
+  [[ -z "${1:-}" ]]
+}
+
+_time_remaining() {
+  local _remaining="$(( 30 - ($(date +%s) % 30) ))"
+
+  if ((_remaining < 5))
+  then
+    printf "Waiting for next token...\\n"
+    sleep "$_remaining"
+  fi
+}
+
+_describe() {
+  [[ -z "${1:-}" ]] && _exit_1 printf "describe(): <name> required.\\n"
+
+  if [[ "${1}" == "--get" ]]
+  then
+    [[ -z "${2:-}" ]] &&
+      _exit_1 printf "describe(): <description> required.\\n"
+
+    local _name="${2:-}"
+    local _describe_var="___describe_${_name}"
+
+    if [[ -n "${!_describe_var:-}" ]]
+    then
+      printf "%s\\n" "${!_describe_var}"
+    else
+      printf "No additional information for \`%s\`\\n" "${_name}"
+    fi
+  else
+    if [[ -n "${2:-}" ]]
+    then
+      read -r -d '' "___describe_${1}" <<HEREDOC
+${2}
+HEREDOC
+    else
+      read -r -d '' "___describe_${1}" || true
+    fi
+  fi
+}
+
+# option parsing ##############################################################
+
+unset options
+
+while ((${#}))
+do
+  case "${1}" in
+    -[!-]?*)
+      for ((i=1; i<${#1}; i++))
+      do
+        c="${1:i:1}"
+        options+=("-${c}")
+      done
+      ;;
+    --?*=*)
+      options+=("${1%%=*}" "${1#*=}")
+      ;;
+    --)
+      options+=(--endopts)
+      shift
+      options+=("${@}")
+      break
+      ;;
+    *)
+      options+=("${1}")
+      ;;
+  esac
+
+  shift
+done
+set -- "${options[@]:-}"
+unset options
+
+_SUBCOMMAND=""
+_SUBCOMMAND_ARGUMENTS=()
+
+while ((${#}))
+do
+  __opt="${1}"
+
+  shift
+
+  case "${__opt}" in
+    -h|--help)
+      _SUBCOMMAND="help"
+      ;;
+    --version)
+      printf "%s\\n" "${_VERSION}"
+      exit 0
+      ;;
+    *)
+      if [[ -n "${_SUBCOMMAND}" ]]
+      then
+        _SUBCOMMAND_ARGUMENTS+=("${__opt}")
+      else
+        _SUBCOMMAND="${__opt}"
+      fi
+      ;;
+  esac
+done
+
+_DEFINED_SUBCOMMANDS=()
+
+# main ########################################################################
+
+main() {
+  local _fingerprint=
+
+  if ! _command_exists gpg
+  then
+    _exit_1 "gpg is not installed!"
+  fi
+
+  if ! _command_exists oathtool
+  then
+    _exit_1 "oath-toolkit is not installed!"
+  fi
+
+  if [ ! -f "${_SECRET_DIR}/.gpg-id" ]
+  then
+    mkdir -p "${_SECRET_DIR}"
+    chmod 0700 "${_SECRET_DIR}"
+    read -p "$(printf "Enter fingerprint: ")" -r _fingerprint
+    printf "%s" "${_fingerprint}" > "${_SECRET_DIR}/.gpg-id"
+    exit 0
+  fi
+
+  if [[ -z "${_SUBCOMMAND}" ]]
+  then
+    _SUBCOMMAND="get"
+  fi
+
+  for __name in $(declare -F)
+  do
+    local _function_name
+    _function_name=$(printf "%s" "${__name}" | awk '{ print $3 }')
+
+    if ! { [[ -z "${_function_name:-}"                      ]] ||
+           [[ "${_function_name}" =~ ^_(.*)                 ]] ||
+           [[ "${_function_name}" == "describe"             ]]
+    }
+    then
+      _DEFINED_SUBCOMMANDS+=("${_function_name}")
+    fi
+  done
+
+  if _contains "${_SUBCOMMAND}" "${_DEFINED_SUBCOMMANDS[@]:-}"
+  then
+    ${_SUBCOMMAND} "${_SUBCOMMAND_ARGUMENTS[@]:-}"
+  elif [ -f "${_SECRET_DIR}/${_SUBCOMMAND}" ]
+  then
+    get "${_SUBCOMMAND}" "${_SUBCOMMAND_ARGUMENTS[@]:-}"
+  else
+    _exit_1 printf "Unknown subcommand: %s\\n" "${_SUBCOMMAND}"
+  fi
+}
+
+# help ########################################################################
+
+help() {
+  if [[ "${1:-}" ]]
+  then
+    _describe --get "${1}"
+  else
+    cat <<HEREDOC
+ ▄▄▄▄▄      ▄▄▄▄▄ ▄▄▄·
+ •██  ▪     •██  ▐█ ▄█
+  ▐█.▪ ▄█▀▄  ▐█.▪ ██▀·
+  ▐█▌·▐█▌.▐▌ ▐█▌·▐█▪·•
+  ▀▀▀  ▀█▄▀▪ ▀▀▀ .▀
+
+Encrypted TOTP secret store.
+
+Version: ${_VERSION}
+
+Usage:
+  ${_ME} add [<account>] [<secret>]
+  ${_ME} del [<account>]
+  ${_ME} get [<account>] [-c | --copy] [-s | --secret]
+  ${_ME} qr  [<account>] [<issuer>] [<label>]
+  ${_ME} -h | --help
+  ${_ME} --version
+
+Options:
+  -h --help  Display this help information.
+  --version  Display version information.
+
+Help:
+  ${_ME} help [<subcommand>]
+
+HEREDOC
+  fi
+}
+
+# add #########################################################################
+
+_describe "add" <<HEREDOC
+Usage:
+  ${_ME} add [<account>] [<secret>]
+
+Description:
+  Add a token to the store.
+HEREDOC
+add() {
+  local _arguments=()
+  local _account=${1:-}
+  local _secret=${2:-}
+  local _fingerprint=$(cat "${_SECRET_DIR}/.gpg-id")
+  export GPG_TTY=$(tty)
+
+  for __arg in "${@:-}"
+  do
+    case ${__arg} in
+      -*)
+        _exit_1 printf "Unexpected option: %s\\n" "${__arg}"
+        ;;
+      *)
+        if _blank "${_account}"
+        then
+          read -p "$(printf "Enter account name: ")" -r _account
+        else
+          _arguments+=("${__arg}")
+        fi
+
+        if _blank "${_secret}"
+        then
+          read -p "$(printf "Enter secret: ")" -r _secret
+        else
+          _arguments+=("${__arg}")
+        fi
+        ;;
+    esac
+  done
+
+  printf "%s" "${_secret// /}" | gpg --quiet --encrypt -r "${_fingerprint}" --out "${_SECRET_DIR}/${_account}"
+}
+
+# del #########################################################################
+
+_describe "del" <<HEREDOC
+Usage:
+  ${_ME} del [<account>]
+
+Description:
+  Delete a token from the store.
+HEREDOC
+del() {
+  local _arguments=()
+  local _account=${1:-}
+
+  for __arg in "${@:-}"
+  do
+    case ${__arg} in
+      -*)
+        _exit_1 printf "Unexpected option: %s\\n" "${__arg}"
+        ;;
+      *)
+        if _blank "${_account}"
+        then
+          read -p "$(printf "Enter name of account to delete: ")" -r _account
+        else
+          _arguments+=("${__arg}")
+        fi
+        ;;
+    esac
+  done
+
+  if [ ! -f "${_SECRET_DIR}/${_account}" ]
+  then
+    _exit_1 printf "No such account\\n"
+  else
+    read -p "$(printf "Delete %s? (y/n) " "${_account}")" -n 1
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]
+    then
+      rm "${_SECRET_DIR}/${_account}"
+    fi
+  fi
+
+}
+
+# get #########################################################################
+
+_describe "get" <<HEREDOC
+Usage:
+  ${_ME} get [<account>] [-c | --copy] [-s | --secret]
+
+Description:
+  Generate TOTP code from a stored token.
+HEREDOC
+get() {
+  local _arguments=()
+  local _account=${1:-}
+  local _code=
+  local _copy=0
+  local _fingerprint=
+  local _secret=
+  local _print_secret=0
+  export GPG_TTY=$(tty)
+
+  _fingerprint=$(cat "${_SECRET_DIR}/.gpg-id")
+
+  for __arg in "${@:-}"
+  do
+    case ${__arg} in
+      -c|--copy)
+        if ! _command_exists "xclip" && ! _command_exists "pbcopy"
+        then
+          _exit_1 printf "Requires xclip package.\\n"
+        else
+          _copy=1
+        fi
+        ;;
+      -s|--secret)
+        _print_secret=1
+        ;;
+      -*)
+        _exit_1 printf "Unexpected option: %s\\n" "${__arg}"
+        ;;
+      *)
+        if _blank "${_account}"
+        then
+          ls -1 "${_SECRET_DIR}"
+          exit 0
+        else
+          if [[ ! -f "${_SECRET_DIR}/${_account}" ]]
+          then
+            _exit_1 printf "No such account\\n"
+          fi
+        fi
+        ;;
+    esac
+  done
+
+  _secret="$(gpg --quiet < "${_SECRET_DIR}/${_account}")"
+
+  if ((_print_secret))
+  then
+    if ((_copy))
+    then
+      if [[ ! "${OSTYPE}" =~ ^darwin ]]
+      then
+        printf "%s\\n" "${_secret}" | tr -d '\n' | xclip -sel clip
+      else
+        printf "%s\\n" "${_secret}" | tr -d '\n' | pbcopy
+      fi && printf "Copied secret to clipboard.\\n"
+      exit 0
+    else
+      printf "%s\\n" "${_secret}"
+      exit 0
+    fi
+  fi
+
+  _time_remaining
+
+  if ((_copy))
+  then
+    if [[ ! "${OSTYPE}" =~ ^darwin ]]
+    then
+      oathtool --base32 --totp "${_secret}" | tr -d '\n' | xclip -sel clip
+    else
+      oathtool --base32 --totp "${_secret}" | tr -d '\n' | pbcopy
+    fi && printf "Copied code to clipboard.\\n"
+  else
+    _code="$(oathtool --base32 --totp "${_secret}")"
+    printf "Your code is: %s\\n" "${_code}"
+  fi
+}
+
+# qr ##########################################################################
+
+_describe "qr" <<HEREDOC
+Usage:
+  ${_ME} qr [<account>] [<issuer>] [<label>]
+
+Description:
+  Generate a QR Code from a stored token.
+HEREDOC
+qr() {
+  local _arguments=()
+  local _account=${1:-}
+  local _issuer=${2:-}
+  local _label=${3:-}
+  local _secret=
+  export GPG_TTY=$(tty)
+
+  if ! _command_exists qrencode
+  then
+    _exit_1 "qrencode is not installed!"
+  fi
+
+  for __arg in "${@:-}"
+  do
+    case ${__arg} in
+      -*)
+        _exit_1 printf "Unexpected option: %s\\n" "${__arg}"
+        ;;
+      *)
+        if _blank "${_account}"
+        then
+          read -p "$(printf "Enter account name: ")" -r _account
+        else
+          _arguments+=("${__arg}")
+        fi
+        ;;
+    esac
+  done
+
+  if [ ! -f "${_SECRET_DIR}/${_account}" ]
+  then
+    _exit_1 printf "No such account\\n"
+  else
+    _secret="$(gpg --quiet < "${_SECRET_DIR}/${_account}")"
+
+    if _blank "${_issuer}"
+    then
+      read -p "$(printf "Enter issuer: ")" -r _issuer
+    else
+      _arguments+=("${__arg}")
+    fi
+
+    if _blank "${_label}"
+    then
+      read -p "$(printf "Enter label (leave blank for none): ")" -r _label
+    else
+      _arguments+=("${__arg}")
+    fi
+
+    qrencode -o- -t UTF8 "otpauth://totp/${_label// /%20}?secret=${_secret}&issuer=${_issuer// /%20}"
+  fi
+}
+
+main
