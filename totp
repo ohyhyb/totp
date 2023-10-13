@@ -391,7 +391,8 @@ get() {
       *)
         if _blank "${_account}"
         then
-          ls -1 "${_SECRET_DIR}"
+          printf "TOTP Store\\n"
+          tree -N -C -l --noreport "${_SECRET_DIR}" | tail -n +2
           exit 0
         else
           if [[ ! -f "${_SECRET_DIR}/${_account}" ]]
